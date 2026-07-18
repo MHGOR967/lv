@@ -1,1 +1,214 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>البث المباشر - المذيع</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 2rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            width: 100%;
+            max-width: 600px;
+        }
+        video {
+            width: 100%;
+            max-height: 400px;
+            background-color: #000;
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        .status-message {
+            margin-top: 1rem;
+            font-weight: bold;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-2xl font-bold mb-4">صفحة البث المباشر</h1>
+        <video id="broadcasterVideo" autoplay muted playsinline></video>
+        <button id="startStreamBtn" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">بدء البث</button>
+        <p id="status" class="status-message">اضغط على 
+بدء البث</p>
+
+        <audio id="silentAudio" loop></audio>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const broadcasterVideo = document.getElementById("broadcasterVideo");
+        const startStreamBtn = document.getElementById("startStreamBtn");
+        const statusDisplay = document.getElementById("status");
+        const silentAudio = document.getElementById("silentAudio");
+
+        const socket = io();
+        let peerConnections = {};
+        let localStream;
+        let wakeLock = null;
+
+        const configuration = {
+            iceServers: [
+                { urls: "stun:stun.l.google.com:19302" },
+                { urls: "stun:stun1.l.google.com:19302" },
+                { urls: "stun:stun2.l.google.com:19302" },
+                { urls: "stun:stun3.l.google.com:19302" },
+                { urls: "stun:stun4.l.google.com:19302" }
+            ]
+        };
+
+        // Silent audio trick to keep camera active
+        function playSilentAudio() {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            gainNode.gain.value = 0.0001; // Very low volume
+            oscillator.frequency.value = 20000; // High frequency, inaudible
+
+            oscillator.start(0);
+            silentAudio.srcObject = audioCtx.createMediaStreamSource(new MediaStream([audioCtx.destination.stream.getAudioTracks()[0]]));
+            silentAudio.play().catch(e => console.error("Error playing silent audio:", e));
+        }
+
+        // Screen Wake Lock API
+        async function requestWakeLock() {
+            if (
+                "wakeLock" in navigator &&
+                "request" in navigator.wakeLock &&
+                wakeLock === null
+            ) {
+                try {
+                    wakeLock = await navigator.wakeLock.request("screen");
+                    wakeLock.addEventListener("release", () => {
+                        console.log("Screen Wake Lock released");
+                    });
+                    console.log("Screen Wake Lock acquired");
+                } catch (err) {
+                    console.error(`${err.name}, ${err.message}`);
+                }
+            }
+        }
+
+        function releaseWakeLock() {
+            if (wakeLock) {
+                wakeLock.release();
+                wakeLock = null;
+            }
+        }
+
+        startStreamBtn.addEventListener("click", async () => {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                broadcasterVideo.srcObject = localStream;
+                socket.emit("broadcaster");
+                startStreamBtn.disabled = true;
+                statusDisplay.textContent = "جاري البث...";
+                requestWakeLock();
+                playSilentAudio();
+            } catch (err) {
+                console.error("Error accessing media devices:", err);
+                statusDisplay.textContent = "خطأ في الوصول إلى الكاميرا والميكروفون.";
+            }
+        });
+
+        socket.on("watcher", id => {
+            const peerConnection = new RTCPeerConnection(configuration);
+            peerConnections[id] = peerConnection;
+
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    socket.emit("candidate", id, event.candidate);
+                }
+            };
+
+            peerConnection.createOffer()
+                .then(sdp => peerConnection.setLocalDescription(sdp))
+                .then(() => {
+                    socket.emit("offer", id, peerConnection.localDescription);
+                });
+
+            statusDisplay.textContent = `مشاهد جديد متصل: ${Object.keys(peerConnections).length} مشاهدين`;
+        });
+
+        socket.on("answer", (id, message) => {
+            peerConnections[id].setRemoteDescription(new RTCSessionDescription(message));
+        });
+
+        socket.on("candidate", (id, message) => {
+            peerConnections[id].addIceCandidate(new RTCIceCandidate(message));
+        });
+
+        socket.on("disconnectPeer", id => {
+            peerConnections[id].close();
+            delete peerConnections[id];
+            statusDisplay.textContent = `مشاهد قطع الاتصال. ${Object.keys(peerConnections).length} مشاهدين متبقين.`;
+        });
+
+        socket.on("broadcaster_disconnected", () => {
+            statusDisplay.textContent = "المذيع قطع الاتصال.";
+            releaseWakeLock();
+            silentAudio.pause();
+            silentAudio.removeAttribute("srcObject");
+            broadcasterVideo.srcObject = null;
+            startStreamBtn.disabled = false;
+            for (let id in peerConnections) {
+                peerConnections[id].close();
+                delete peerConnections[id];
+            }
+        });
+
+        window.addEventListener("beforeunload", () => {
+            socket.disconnect();
+            releaseWakeLock();
+            silentAudio.pause();
+            silentAudio.removeAttribute("srcObject");
+        });
+
+        // Reconnection logic
+        socket.on("disconnect", () => {
+            console.log("Socket disconnected. Attempting to reconnect...");
+            statusDisplay.textContent = "تم قطع الاتصال. جاري محاولة إعادة الاتصال...";
+            releaseWakeLock();
+            silentAudio.pause();
+            silentAudio.removeAttribute("srcObject");
+            startStreamBtn.disabled = false;
+            for (let id in peerConnections) {
+                peerConnections[id].close();
+                delete peerConnections[id];
+            }
+        });
+
+        socket.on("connect", () => {
+            console.log("Socket reconnected.");
+            if (localStream) {
+                socket.emit("broadcaster");
+                statusDisplay.textContent = "تم إعادة الاتصال. جاري البث...";
+                requestWakeLock();
+                playSilentAudio();
+            }
+        });
+
+    </script>
+</body>
+</html>
 
