@@ -1,1 +1,163 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>البث المباشر - المشاهد</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 2rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            width: 100%;
+            max-width: 600px;
+        }
+        video {
+            width: 100%;
+            max-height: 400px;
+            background-color: #000;
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        .status-message {
+            margin-top: 1rem;
+            font-weight: bold;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-2xl font-bold mb-4">صفحة مشاهدة البث المباشر</h1>
+        <video id="viewerVideo" autoplay playsinline></video>
+        <p id="status" class="status-message">جاري البحث عن مذيع...</p>
+    </div>
 
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const viewerVideo = document.getElementById("viewerVideo");
+        const statusDisplay = document.getElementById("status");
+        const socket = io();
+
+        let peerConnection;
+
+        const configuration = {
+            iceServers: [
+                { urls: "stun:stun.l.google.com:19302" },
+                { urls: "stun:stun1.l.google.com:19302" },
+                { urls: "stun:stun2.l.google.com:19302" },
+                { urls: "stun:stun3.l.google.com:19302" },
+                { urls: "stun:stun4.l.google.com:19302" }
+            ]
+        };
+
+        socket.on("connect", () => {
+            console.log("Socket connected.");
+            socket.emit("watcher");
+            statusDisplay.textContent = "جاري البحث عن مذيع...";
+        });
+
+        socket.on("broadcaster_found", () => {
+            console.log("Broadcaster found. Setting up peer connection.");
+            statusDisplay.textContent = "تم العثور على المذيع. جاري إعداد الاتصال...";
+            if (peerConnection) {
+                peerConnection.close();
+            }
+            peerConnection = new RTCPeerConnection(configuration);
+
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    socket.emit("candidate", broadcasterId, event.candidate);
+                }
+            };
+
+            peerConnection.ontrack = event => {
+                viewerVideo.srcObject = event.streams[0];
+                statusDisplay.textContent = "جاري مشاهدة البث المباشر.";
+            };
+
+            peerConnection.createOffer()
+                .then(sdp => peerConnection.setLocalDescription(sdp))
+                .then(() => {
+                    socket.emit("offer", broadcasterId, peerConnection.localDescription);
+                });
+        });
+
+        socket.on("no_broadcaster", () => {
+            statusDisplay.textContent = "لا يوجد مذيع متاح حاليًا.";
+            console.log("No broadcaster available.");
+        });
+
+        let broadcasterId;
+        socket.on("offer", (id, message) => {
+            broadcasterId = id;
+            if (peerConnection) {
+                peerConnection.close();
+            }
+            peerConnection = new RTCPeerConnection(configuration);
+
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    socket.emit("candidate", id, event.candidate);
+                }
+            };
+
+            peerConnection.ontrack = event => {
+                viewerVideo.srcObject = event.streams[0];
+                statusDisplay.textContent = "جاري مشاهدة البث المباشر.";
+            };
+
+            peerConnection.setRemoteDescription(new RTCSessionDescription(message))
+                .then(() => peerConnection.createAnswer())
+                .then(sdp => peerConnection.setLocalDescription(sdp))
+                .then(() => {
+                    socket.emit("answer", id, peerConnection.localDescription);
+                });
+        });
+
+        socket.on("candidate", (id, message) => {
+            peerConnection.addIceCandidate(new RTCIceCandidate(message));
+        });
+
+        socket.on("broadcaster_disconnected", () => {
+            statusDisplay.textContent = "المذيع قطع الاتصال.";
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            viewerVideo.srcObject = null;
+            socket.emit("watcher"); // Try to find a new broadcaster
+        });
+
+        socket.on("disconnect", () => {
+            console.log("Socket disconnected. Attempting to reconnect...");
+            statusDisplay.textContent = "تم قطع الاتصال. جاري محاولة إعادة الاتصال...";
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            viewerVideo.srcObject = null;
+        });
+
+        window.addEventListener("beforeunload", () => {
+            socket.disconnect();
+            if (peerConnection) {
+                peerConnection.close();
+            }
+        });
+
+    </script>
+</body>
+</html>
